@@ -1,240 +1,170 @@
 mod benchmark;
 mod cli;
+mod display;
 mod system;
 mod types;
+mod utils;
 
 use clap::Parser;
-use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::Client;
 
-use benchmark::{benchmark_model, run_trial, stddev};
+use benchmark::{benchmark_model, run_benchmark_iterations, run_trial};
 use cli::Args;
+use display::{
+    print_comparison_header, print_comparison_table, print_model_card, print_single_results,
+    print_system_info,
+};
 use system::gather_system_info;
-use types::{DEFAULT_PROMPT, ModelBenchmarkResult};
+use types::{BenchConfig, BenchmarkOutput, DEFAULT_PROMPT, WARMUP_PROMPT};
+use utils::Stats;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse();
-    let client = Client::new();
+/// Run in single-model benchmark mode.
+async fn run_single(
+    client: &Client,
+    args: &Args,
+) -> Result<(), Box<dyn std::error::Error>> {
     let prompt = args.prompt.as_deref().unwrap_or(DEFAULT_PROMPT);
 
-    // Print system info header
-    let sys = gather_system_info(&client, &args.host, &args.model).await;
-
-    println!("╔══════════════════════════════════════════════════════════════╗");
-    println!("║  🚀  Ollama Rust Hardware Benchmark Suite                    ║");
-    println!("╠══════════════════════════════════════════════════════════════╣");
-    println!("║  System Info                                                 ║");
-    println!("╠══════════════════════════════════════════════════════════════╣");
-    println!("║  OS:             {}", sys.os);
-    println!("║  CPU:            {}", sys.cpu);
-    println!("║  RAM:            {}", sys.ram_total);
-    println!("║  GPU:            {}", sys.gpu);
-    println!("║  Inference:      {}", sys.device);
-    println!("╠══════════════════════════════════════════════════════════════╣");
-    println!("║  Benchmark Config                                            ║");
-    println!("╠══════════════════════════════════════════════════════════════╣");
-    println!("║  Context Window:  {} tokens", args.ctx);
-    println!("║  Iterations:      {} runs (+ 1 warmup)", args.iterations);
-    println!("╚══════════════════════════════════════════════════════════════╝\n");
-
-    // --- Comparison mode ---
-    if !args.compare.is_empty() {
-        println!(
-            "🔍  Comparison mode: benchmarking {} models\n",
-            args.compare.len()
-        );
-
-        let mut results: Vec<ModelBenchmarkResult> = Vec::new();
-        for model in &args.compare {
-            print!("  ▶  Benchmarking {} ... ", model);
-            match benchmark_model(
-                &client,
-                model,
-                prompt,
-                args.iterations,
-                args.ctx,
-                args.num_predict,
-                args.temperature,
-                &args.host,
-            )
-            .await
-            {
-                Some(r) => {
-                    results.push(r);
-                    println!("OK");
-                }
-                None => println!("FAILED"),
-            }
-        }
-
-        if results.is_empty() {
-            println!("All models failed. Verify Ollama is running and models are pulled.");
-            return Ok(());
-        }
-
-        // Print comparison table
-        println!(
-            "\n╔══════════════════════════════════════════════════════════════════════════════════════╗"
-        );
-        println!(
-            "║  📊  Model Comparison Results                                                        ║"
-        );
-        println!(
-            "╠══════════════════════════════════════════════════════════════════════════════════════╣"
-        );
-
-        // Header
-        println!(
-            "║  {:<23}  {:>8}  {:>8}  {:>8}  {:>8}  {:>8}  {:>8} ║",
-            "Model", "Params", "AvgPre", "StdPre", "AvgDec", "StdDec", "MinDec"
-        );
-        println!(
-            "╠{:─<26}╬{:─<9}╬{:─<9}╬{:─<9}╬{:─<9}╬{:─<9}╬{:─<9}╣",
-            "", "", "", "", "", "", ""
-        );
-
-        for r in &results {
-            println!(
-                "║  {:<23}  {:>8}  {:>8.1}  {:>8.1}  {:>8.1}  {:>8.1}  {:>8.1} ║",
-                r.model,
-                r.params,
-                r.avg_prefill,
-                r.stddev_prefill,
-                r.avg_decode,
-                r.stddev_decode,
-                r.min_decode
-            );
-        }
-
-        println!(
-            "╚══════════════════════════════════════════════════════════════════════════════════════╝"
-        );
-
-        // Per-model detail cards
-        for r in &results {
-            println!("\n╔════════════════════════════════════════════════════════════════╗");
-            println!(
-                "║  📋  {}                                             ║",
-                r.model
-            );
-            println!("╠════════════════════════════════════════════════════════════════╣");
-            println!("║  Architecture:   {}", r.family);
-            println!("║  Parameters:     {}", r.params);
-            println!("║  Quantization:   {}", r.quant);
-            println!("║  Model Size:     {}", r.size);
-            println!("╠════════════════════════════════════════════════════════════════╣");
-            println!(
-                "║  Prefill (tokens/s)   Avg: {:>10.2}  Min: {:>10.2}  Max: {:>10.2}  Std: {:>10.2}",
-                r.avg_prefill, r.min_prefill, r.max_prefill, r.stddev_prefill
-            );
-            println!(
-                "║  Decode  (tokens/s)   Avg: {:>10.2}  Min: {:>10.2}  Max: {:>10.2}  Std: {:>10.2}",
-                r.avg_decode, r.min_decode, r.max_decode, r.stddev_decode
-            );
-            println!("╚════════════════════════════════════════════════════════════════╝");
-        }
-
-        return Ok(());
-    }
-
-    // --- Single model mode ---
-    println!("╔══════════════════════════════════════════════════════════════╗");
-    println!("║  Ollama & Model                                              ║");
-    println!("╠══════════════════════════════════════════════════════════════╣");
-    println!("║  Ollama Version: {}", sys.ollama_version);
-    println!("║  Model:          {}", args.model);
-    println!("║  Parameters:     {}", sys.model_params);
-    println!("║  Quantization:   {}", sys.model_quant);
-    println!("║  Architecture:   {}", sys.model_family);
-    println!("║  Model Size:     {}", sys.model_size);
-    println!("║  KV Cache Type:  {}", sys.kv_cache_type);
-    println!("╚══════════════════════════════════════════════════════════════╝\n");
-
-    // Warmup
-    print!("⏳ Priming {} (Warmup run)... ", sys.device);
-    let _ = run_trial(
-        &client,
-        &args.model,
-        "Hello, world!",
+    // Gather and display system info
+    let sys = gather_system_info(client, &args.host, &args.model, args.ctx, args.iterations).await;
+    print_system_info(
+        &sys.os,
+        &sys.cpu,
+        &sys.ram_total,
+        &sys.gpu,
+        &sys.device,
         args.ctx,
-        args.num_predict,
-        args.temperature,
-        &args.host,
-    )
-    .await?;
-    println!("Done.");
-
-    // Main Benchmark Loop
-    let mut prefill_results = Vec::new();
-    let mut decode_results = Vec::new();
-
-    let pb = ProgressBar::new(args.iterations as u64);
-    pb.set_style(
-        ProgressStyle::with_template(
-            "[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} trials completed",
-        )
-        .unwrap()
-        .progress_chars("#>-"),
+        args.iterations,
+    );
+    print_model_card(
+        &sys.ollama_version,
+        &sys.model_name,
+        &sys.model_params,
+        &sys.model_quant,
+        &sys.model_family,
+        &sys.model_size,
+        &sys.kv_cache_type,
     );
 
-    for _ in 0..args.iterations {
-        match run_trial(
-            &client,
-            &args.model,
-            prompt,
-            args.ctx,
-            args.num_predict,
-            args.temperature,
-            &args.host,
-        )
-        .await
-        {
-            Ok(metrics) => {
-                if let Some(p) = metrics.prefill_tps {
-                    prefill_results.push(p);
-                }
-                decode_results.push(metrics.decode_tps);
-            }
-            Err(e) => eprintln!("\n❌ Trial failed: {}", e),
-        }
-        pb.inc(1);
-    }
-    pb.finish_and_clear();
+    let config = BenchConfig::from_args(args, prompt);
 
-    // Statistical Analysis
+    // Warmup
+    let warmup_config = BenchConfig {
+        prompt: WARMUP_PROMPT.to_string(),
+        ..config.clone()
+    };
+    print!("⏳ Priming {} (Warmup run)... ", sys.device);
+    let _ = run_trial(client, &warmup_config).await?;
+    println!("Done.");
+
+    // Benchmark
+    let (prefill_results, decode_results) = run_benchmark_iterations(client, &config).await;
+
     if decode_results.is_empty() {
         println!("All trials failed. Verify Ollama is running.");
         return Ok(());
     }
 
-    let avg_decode: f64 = decode_results.iter().sum::<f64>() / decode_results.len() as f64;
-    let max_decode = decode_results.iter().cloned().fold(f64::NAN, f64::max);
-    let min_decode = decode_results.iter().cloned().fold(f64::NAN, f64::min);
-    let std_decode = stddev(&decode_results);
+    let prefill_stats = Stats::compute(&prefill_results);
+    let decode_stats = Stats::compute(&decode_results);
 
-    println!("╔══════════════════════════════════════════════════════════════╗");
-    println!("║  📊  Benchmark Results Summary                               ║");
-    println!("╠══════════════════════════════════════════════════════════════╣");
-    println!("║  Prompt Processing (Prefill)                                 ║");
-    if prefill_results.is_empty() {
-        println!("║    (all runs were KV-cache hits — prefill not measured)      ║");
-    } else {
-        let avg_prefill = prefill_results.iter().sum::<f64>() / prefill_results.len() as f64;
-        let max_prefill = prefill_results.iter().cloned().fold(f64::NAN, f64::max);
-        let min_prefill = prefill_results.iter().cloned().fold(f64::NAN, f64::min);
-        let std_prefill = stddev(&prefill_results);
-        println!(
-            "║    Avg: {:>10.2}  Min: {:>10.2}  Max: {:>10.2}  Std: {:>10.2}  t/s",
-            avg_prefill, min_prefill, max_prefill, std_prefill
-        );
+    // JSON output
+    if args.json {
+        let sys_json = types::SystemInfoJson::from(&sys);
+        let result = types::ModelBenchmarkResult {
+            model: args.model.to_string(),
+            avg_prefill: prefill_stats.avg,
+            min_prefill: prefill_stats.min,
+            max_prefill: prefill_stats.max,
+            stddev_prefill: prefill_stats.stddev,
+            avg_decode: decode_stats.avg,
+            min_decode: decode_stats.min,
+            max_decode: decode_stats.max,
+            stddev_decode: decode_stats.stddev,
+            params: sys.model_params.clone(),
+            quant: sys.model_quant.clone(),
+            family: sys.model_family.clone(),
+            size: sys.model_size.clone(),
+        };
+        let output = BenchmarkOutput {
+            system: sys_json,
+            results: vec![result],
+        };
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
     }
-    println!("║  Token Generation (Decode)                                   ║");
-    println!(
-        "║    Avg: {:>10.2}  Min: {:>10.2}  Max: {:>10.2}  Std: {:>10.2}  t/s",
-        avg_decode, min_decode, max_decode, std_decode
-    );
-    println!("╚══════════════════════════════════════════════════════════════╝");
 
+    // Pretty-print results
+    print_single_results(&prefill_stats, &decode_stats, prefill_results.is_empty());
     Ok(())
+}
+
+/// Run in comparison (multi-model) benchmark mode.
+async fn run_comparison(
+    client: &Client,
+    args: &Args,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let prompt = args.prompt.as_deref().unwrap_or(DEFAULT_PROMPT);
+
+    print_comparison_header(&args.compare);
+
+    let base_config = BenchConfig::from_args(args, prompt);
+
+    let mut results: Vec<types::ModelBenchmarkResult> = Vec::new();
+    for model in &args.compare {
+        print!("  ▶  Benchmarking {} ... ", model);
+        let model_config = base_config.for_model(model);
+        match benchmark_model(client, &model_config).await {
+            Some(r) => {
+                results.push(r);
+                println!("OK");
+            }
+            None => println!("FAILED"),
+        }
+    }
+
+    if results.is_empty() {
+        println!("All models failed. Verify Ollama is running and models are pulled.");
+        return Ok(());
+    }
+
+    // JSON output
+    if args.json {
+        let output = BenchmarkOutput {
+            system: types::SystemInfoJson {
+                os: String::new(),
+                cpu: String::new(),
+                ram_total: String::new(),
+                gpu: String::new(),
+                ollama_version: String::new(),
+                device: String::new(),
+                model_name: String::new(),
+                model_params: String::new(),
+                model_quant: String::new(),
+                model_family: String::new(),
+                model_size: String::new(),
+                kv_cache_type: String::new(),
+                ctx: args.ctx,
+                iterations: args.iterations,
+            },
+            results,
+        };
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    // Pretty-print
+    print_comparison_table(&results);
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+
+    if !args.compare.is_empty() {
+        return run_comparison(&Client::new(), &args).await;
+    }
+
+    run_single(&Client::new(), &args).await
 }

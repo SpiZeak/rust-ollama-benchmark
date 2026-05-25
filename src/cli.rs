@@ -37,4 +37,8 @@ pub struct Args {
     /// Ollama API host URL
     #[arg(long, default_value_t = std::borrow::Cow::Borrowed(DEFAULT_HOST))]
     pub host: std::borrow::Cow<'static, str>,
+
+    /// Output results as JSON (to stdout) instead of pretty tables
+    #[arg(long)]
+    pub json: bool,
 }

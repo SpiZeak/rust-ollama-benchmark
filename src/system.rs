@@ -1,24 +1,25 @@
 use reqwest::Client;
 use std::process::Command;
 
-use crate::types::{ModelInfo, OllamaShow, OllamaTags, OllamaVersion, SystemInfo};
+use crate::types::{OllamaShow, OllamaVersion, SystemInfo};
+use crate::utils::{fetch_tags, ModelDetailsPlain};
 
 /// Run a CLI command and return its stdout, or a fallback string on failure.
-pub fn run_cmd(cmd: &str, args: &[&str], fallback: &str) -> String {
-    match Command::new(cmd).args(args).output() {
-        Ok(out) => String::from_utf8_lossy(&out.stdout).trim().to_string(),
-        Err(_) => fallback.to_string(),
-    }
+fn run_cmd(cmd: &str, args: &[&str], fallback: &str) -> String {
+    Command::new(cmd)
+        .args(args)
+        .output()
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .unwrap_or_else(|_| fallback.to_string())
 }
 
-/// Detect the GPU by trying nvidia-smi first, then lspci for AMD/Intel.
-pub fn detect_gpu() -> (String, bool) {
+/// Detect the GPU by trying nvidia-smi first, then lspci, then system_profiler.
+fn detect_gpu() -> (String, bool) {
     // Try NVIDIA
-    let nvidia = Command::new("nvidia-smi")
-        .arg("--query-gpu=name")
-        .arg("--format=csv,noheader")
-        .output();
-    if let Ok(out) = nvidia {
+    if let Ok(out) = Command::new("nvidia-smi")
+        .args(["--query-gpu=name", "--format=csv,noheader"])
+        .output()
+    {
         let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if !name.is_empty() && !name.contains("[FAILED]") {
             return (format!("NVIDIA: {}", name), true);
@@ -26,55 +27,53 @@ pub fn detect_gpu() -> (String, bool) {
     }
 
     // Try GPU via lspci
-    let lspci = Command::new("lspci").arg("-nn").output();
-    if let Ok(out) = lspci {
+    if let Ok(out) = Command::new("lspci").arg("-nn").output() {
         let output = String::from_utf8_lossy(&out.stdout);
         for line in output.lines() {
-            if line.to_lowercase().contains("vga") || line.to_lowercase().contains("3d") {
-                // Extract description after the ": " separator
-                let desc = line.split(": ").nth(1).unwrap_or(&line);
-                // Strip PCI metadata: [hex:hex], [hex], (rev X)
-                let clean = desc
-                    .split_whitespace()
-                    .filter(|tok| {
-                        !(tok.starts_with('[') && tok.ends_with(']')) && !tok.starts_with("(rev")
-                    })
-                    .collect::<Vec<&str>>()
-                    .join(" ");
-                let lower = clean.to_lowercase();
-                // Strip vendor prefix for shorter display
-                let short = if let Some(comma) = clean.find(',') {
-                    clean[comma + 1..].trim().to_string()
-                } else {
-                    clean.clone()
-                };
-                if lower.contains("amd") || lower.contains("radeon") {
-                    return (format!("AMD: {}", short), true);
-                }
-                if lower.contains("intel") {
-                    return (format!("Intel: {}", short), true);
-                }
-                return (clean, true);
+            let lower = line.to_lowercase();
+            if !(lower.contains("vga") || lower.contains("3d")) {
+                continue;
             }
+            let desc = line.split(": ").nth(1).unwrap_or(line);
+            // Strip PCI metadata: [hex:hex], [hex], (rev X)
+            let clean: String = desc
+                .split_whitespace()
+                .filter(|tok| {
+                    !(tok.starts_with('[') && tok.ends_with(']')) && !tok.starts_with("(rev")
+                })
+                .collect::<Vec<&str>>()
+                .join(" ");
+            let lower_clean = clean.to_lowercase();
+            // Strip vendor prefix for shorter display
+            let short = clean
+                .find(',')
+                .map(|comma| clean[comma + 1..].trim().to_string())
+                .unwrap_or_else(|| clean.clone());
+            if lower_clean.contains("amd") || lower_clean.contains("radeon") {
+                return (format!("AMD: {}", short), true);
+            }
+            if lower_clean.contains("intel") {
+                return (format!("Intel: {}", short), true);
+            }
+            return (clean, true);
         }
     }
 
     // Try macOS GPU
-    let system_profiler = Command::new("system_profiler")
+    if let Ok(out) = Command::new("system_profiler")
         .arg("SPDisplaysDataType")
-        .output();
-    if let Ok(out) = system_profiler {
+        .output()
+    {
         let output = String::from_utf8_lossy(&out.stdout);
         for line in output.lines() {
             if line.contains("Chipset Model") || line.contains("GPU Model") {
-                return (
-                    line.trim()
-                        .trim_start_matches("Chipset Model:")
-                        .trim_start_matches("GPU Model:")
-                        .trim()
-                        .to_string(),
-                    true,
-                );
+                let name = line
+                    .trim()
+                    .trim_start_matches("Chipset Model:")
+                    .trim_start_matches("GPU Model:")
+                    .trim()
+                    .to_string();
+                return (name, true);
             }
         }
     }
@@ -83,7 +82,13 @@ pub fn detect_gpu() -> (String, bool) {
 }
 
 /// Gather system + Ollama info before benchmarking.
-pub async fn gather_system_info(client: &Client, host: &str, model_name: &str) -> SystemInfo {
+pub async fn gather_system_info(
+    client: &Client,
+    host: &str,
+    model_name: &str,
+    ctx: u32,
+    iterations: usize,
+) -> SystemInfo {
     // OS
     let os = run_cmd("uname", &["-srm"], "Unknown OS");
 
@@ -105,11 +110,7 @@ pub async fn gather_system_info(client: &Client, host: &str, model_name: &str) -
 
     // RAM
     let ram_total = if cfg!(target_os = "linux") {
-        let meminfo = run_cmd(
-            "awk",
-            &["/MemTotal/{print $2, $3}", "/proc/meminfo"],
-            "Unknown",
-        );
+        let meminfo = run_cmd("awk", &["/MemTotal/{print $2, $3}", "/proc/meminfo"], "Unknown");
         if meminfo != "Unknown" {
             let kb: f64 = meminfo
                 .split_whitespace()
@@ -126,83 +127,49 @@ pub async fn gather_system_info(client: &Client, host: &str, model_name: &str) -
             "Unknown".to_string()
         }
     } else if cfg!(target_os = "macos") {
-        run_cmd("sysctl", &["-n", "hw.memsize"], "Unknown")
+        let raw = run_cmd("sysctl", &["-n", "hw.memsize"], "Unknown");
+        raw.parse::<f64>()
+            .map(|b| format!("{:.0} GiB", b / 1_073_741_824.0))
+            .unwrap_or(raw)
     } else {
         "Unknown".to_string()
     };
 
     // GPU
-    let (gpu, _has_gpu) = detect_gpu();
+    let (gpu, has_gpu) = detect_gpu();
 
     // Ollama version
-    let ollama_version = match client.get(format!("{}/api/version", host)).send().await {
-        Ok(resp) => resp
-            .json::<OllamaVersion>()
-            .await
-            .unwrap_or_else(|_| OllamaVersion {
-                version: "unknown".to_string(),
-            }),
-        Err(_) => OllamaVersion {
-            version: "unreachable".to_string(),
+    let ollama_version = match client
+        .get(format!("{}/api/version", host))
+        .send()
+        .await
+    {
+        Ok(resp) => match resp.json::<OllamaVersion>().await {
+            Ok(v) => v.version,
+            Err(_) => "unknown".to_string(),
         },
+        Err(_) => "unreachable".to_string(),
     };
 
-    // Model details from /api/tags
-    let tags = match client.get(format!("{}/api/tags", host)).send().await {
-        Ok(resp) => match resp.json::<OllamaTags>().await {
-            Ok(t) => Some(t),
-            Err(_) => None,
-        },
-        Err(_) => None,
+    // Model info
+    let details = match fetch_tags(client, host).await {
+        Some(tags) => tags
+            .models
+            .iter()
+            .find(|m| {
+                m.name == model_name
+                    || m.name
+                        .strip_suffix(":latest")
+                        .map(|n| n == model_name)
+                        .unwrap_or(false)
+            })
+            .map(ModelDetailsPlain::from_model_info)
+            .unwrap_or_else(ModelDetailsPlain::na),
+        None => ModelDetailsPlain::na(),
     };
 
-    let model_info: Option<ModelInfo> = tags.and_then(|t| {
-        t.models.into_iter().find(|m| {
-            m.name == model_name
-                || m.name
-                    .strip_suffix(":latest")
-                    .map(|n| n == model_name)
-                    .unwrap_or(false)
-        })
-    });
-
-    let (model_params, model_quant, model_family, model_size) = if let Some(mi) = model_info {
-        (
-            mi.details
-                .parameter_size
-                .clone()
-                .unwrap_or_else(|| "N/A".to_string()),
-            mi.details
-                .quantization_level
-                .clone()
-                .unwrap_or_else(|| "N/A".to_string()),
-            {
-                let fam = mi
-                    .details
-                    .families
-                    .clone()
-                    .filter(|v| !v.is_empty())
-                    .map(|v| v.join(", "));
-                fam.or_else(|| mi.details.family.clone())
-                    .unwrap_or_else(|| "N/A".to_string())
-            },
-            format!("{:.1} GB", mi.size as f64 / 1_073_741_824.0),
-        )
-    } else {
-        (
-            "N/A".to_string(),
-            "N/A".to_string(),
-            "N/A".to_string(),
-            "N/A".to_string(),
-        )
-    };
-
-    // Determine device: if GPU detected and not CPU-only, assume GPU inference
-    let device = if _has_gpu {
-        "GPU".to_string()
-    } else {
-        "CPU".to_string()
-    };
+    // Device: if GPU detected and not CPU-only, assume GPU inference
+    let device = if has_gpu { "GPU" } else { "CPU" };
 
     // KV Cache type from /api/show
     let kv_cache_type = match client
@@ -226,12 +193,15 @@ pub async fn gather_system_info(client: &Client, host: &str, model_name: &str) -
         cpu,
         ram_total,
         gpu,
-        ollama_version: ollama_version.version,
-        model_params,
-        model_quant,
-        model_family,
-        model_size,
-        device,
+        ollama_version,
+        model_name: model_name.to_string(),
+        model_params: details.params,
+        model_quant: details.quant,
+        model_family: details.family,
+        model_size: details.size,
+        device: device.to_string(),
         kv_cache_type,
+        ctx,
+        iterations,
     }
 }

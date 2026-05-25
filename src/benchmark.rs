@@ -2,42 +2,28 @@ use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::Client;
 
 use crate::types::{
-    ModelBenchmarkResult, ModelInfo, OllamaOptions, OllamaRequest, OllamaResponse, OllamaTags,
-    RunMetrics,
+    BenchConfig, ModelBenchmarkResult, OllamaOptions, OllamaRequest, OllamaResponse, RunMetrics,
 };
+use crate::utils::{fetch_tags, ModelDetailsPlain, Stats};
 
-pub fn stddev(values: &[f64]) -> f64 {
-    if values.len() < 2 {
-        return 0.0;
-    }
-    let mean = values.iter().sum::<f64>() / values.len() as f64;
-    let variance =
-        values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (values.len() - 1) as f64;
-    variance.sqrt()
-}
-
+/// Run a single benchmark trial against the Ollama API.
 pub async fn run_trial(
     client: &Client,
-    model: &str,
-    prompt: &str,
-    ctx: u32,
-    num_predict: u32,
-    temperature: f32,
-    host: &str,
+    config: &BenchConfig,
 ) -> Result<RunMetrics, Box<dyn std::error::Error>> {
     let payload = OllamaRequest {
-        model,
-        prompt,
+        model: &config.model,
+        prompt: &config.prompt,
         stream: false,
         options: OllamaOptions {
-            num_ctx: ctx,
-            num_predict,
-            temperature,
+            num_ctx: config.ctx,
+            num_predict: config.num_predict,
+            temperature: config.temperature,
         },
     };
 
     let res: OllamaResponse = client
-        .post(&format!("{}/api/generate", host))
+        .post(format!("{}/api/generate", config.host))
         .json(&payload)
         .send()
         .await?
@@ -46,7 +32,7 @@ pub async fn run_trial(
 
     let prefill_tps = match (res.prompt_eval_count, res.prompt_eval_duration) {
         (Some(count), Some(dur)) if dur > 0 => Some(count as f64 / (dur as f64 / 1_000_000_000.0)),
-        _ => None, // KV cache hit — prefill was skipped by Ollama
+        _ => None,
     };
     let (eval_count, eval_duration) = match (res.eval_count, res.eval_duration) {
         (Some(c), Some(d)) if d > 0 => (c, d),
@@ -60,80 +46,12 @@ pub async fn run_trial(
     })
 }
 
-/// Benchmark a single model and return aggregated stats.
-pub async fn benchmark_model(
+/// Run one or more benchmark iterations (after warmup) and return per-run metrics.
+pub async fn run_benchmark_iterations(
     client: &Client,
-    model: &str,
-    prompt: &str,
-    iterations: usize,
-    ctx: u32,
-    num_predict: u32,
-    temperature: f32,
-    host: &str,
-) -> Option<ModelBenchmarkResult> {
-    // Fetch model metadata
-    let tags = match client.get(format!("{}/api/tags", host)).send().await {
-        Ok(resp) => match resp.json::<OllamaTags>().await {
-            Ok(t) => Some(t),
-            Err(_) => None,
-        },
-        Err(_) => None,
-    };
-
-    let model_info: Option<ModelInfo> = tags.and_then(|t| {
-        t.models.into_iter().find(|m| {
-            m.name == model
-                || m.name
-                    .strip_suffix(":latest")
-                    .map(|n| n == model)
-                    .unwrap_or(false)
-        })
-    });
-
-    let (params, quant, family, size) = if let Some(mi) = model_info {
-        (
-            mi.details
-                .parameter_size
-                .clone()
-                .unwrap_or_else(|| "N/A".to_string()),
-            mi.details
-                .quantization_level
-                .clone()
-                .unwrap_or_else(|| "N/A".to_string()),
-            mi.details
-                .families
-                .clone()
-                .filter(|v| !v.is_empty())
-                .map(|v| v.join(", "))
-                .or_else(|| mi.details.family.clone())
-                .unwrap_or_else(|| "N/A".to_string()),
-            format!("{:.1} GB", mi.size as f64 / 1_073_741_824.0),
-        )
-    } else {
-        (
-            "N/A".to_string(),
-            "N/A".to_string(),
-            "N/A".to_string(),
-            "N/A".to_string(),
-        )
-    };
-
-    // Warmup
-    let _ = run_trial(
-        client,
-        model,
-        "Hello, world!",
-        ctx,
-        num_predict,
-        temperature,
-        host,
-    )
-    .await;
-
-    let mut prefill_results = Vec::new();
-    let mut decode_results = Vec::new();
-
-    let pb = ProgressBar::new(iterations as u64);
+    config: &BenchConfig,
+) -> (Vec<f64>, Vec<f64>) {
+    let pb = ProgressBar::new(config.iterations as u64);
     pb.set_style(
         ProgressStyle::with_template(
             "[{elapsed_precise}] [{bar:30.cyan/blue}] {pos}/{len} ({msg})",
@@ -141,40 +59,80 @@ pub async fn benchmark_model(
         .unwrap()
         .progress_chars("#>-"),
     );
-    pb.set_message(format!("Benchmarking {}", model));
+    pb.set_message(config.model.clone());
 
-    for _ in 0..iterations {
-        match run_trial(client, model, prompt, ctx, num_predict, temperature, host).await {
+    let mut prefill_results = Vec::new();
+    let mut decode_results = Vec::new();
+
+    for _ in 0..config.iterations {
+        match run_trial(client, config).await {
             Ok(metrics) => {
                 if let Some(p) = metrics.prefill_tps {
                     prefill_results.push(p);
                 }
                 decode_results.push(metrics.decode_tps);
             }
-            Err(e) => eprintln!("\n  ⚠️  Trial failed for {}: {}", model, e),
+            Err(e) => eprintln!("\n  ⚠️  Trial failed for {}: {}", config.model, e),
         }
         pb.inc(1);
     }
     pb.finish_and_clear();
 
+    (prefill_results, decode_results)
+}
+
+/// Benchmark a single model and return aggregated stats.
+pub async fn benchmark_model(
+    client: &Client,
+    config: &BenchConfig,
+) -> Option<ModelBenchmarkResult> {
+    // Fetch model metadata
+    let details: ModelDetailsPlain = match fetch_tags(client, &config.host).await {
+        Some(tags) => tags
+            .models
+            .iter()
+            .find(|m| {
+                m.name == config.model
+                    || m.name
+                        .strip_suffix(":latest")
+                        .map(|n| n == config.model.as_str())
+                        .unwrap_or(false)
+            })
+            .map(ModelDetailsPlain::from_model_info)
+            .unwrap_or_else(ModelDetailsPlain::na),
+        None => ModelDetailsPlain::na(),
+    };
+
+    // Warmup with a short prompt
+    let warmup_config = BenchConfig {
+        prompt: crate::types::WARMUP_PROMPT.to_string(),
+        ..config.clone()
+    };
+    let _ = run_trial(client, &warmup_config).await;
+
+    let (prefill_results, decode_results) = run_benchmark_iterations(client, config).await;
+
     if decode_results.is_empty() {
-        println!("  ❌ All trials failed for {}. Skipping.", model);
+        println!("  ❌ All trials failed for {}. Skipping.", config.model);
         return None;
     }
 
+    let prefill_stats = Stats::compute(&prefill_results);
+    let decode_stats = Stats::compute(&decode_results);
+
     Some(ModelBenchmarkResult {
-        model: model.to_string(),
-        avg_prefill: prefill_results.iter().sum::<f64>() / prefill_results.len() as f64,
-        min_prefill: prefill_results.iter().cloned().fold(f64::NAN, f64::min),
-        max_prefill: prefill_results.iter().cloned().fold(f64::NAN, f64::max),
-        stddev_prefill: stddev(&prefill_results),
-        avg_decode: decode_results.iter().sum::<f64>() / decode_results.len() as f64,
-        min_decode: decode_results.iter().cloned().fold(f64::NAN, f64::min),
-        max_decode: decode_results.iter().cloned().fold(f64::NAN, f64::max),
-        stddev_decode: stddev(&decode_results),
-        params,
-        quant,
-        family,
-        size,
+        model: config.model.clone(),
+        avg_prefill: prefill_stats.avg,
+        min_prefill: prefill_stats.min,
+        max_prefill: prefill_stats.max,
+        stddev_prefill: prefill_stats.stddev,
+        avg_decode: decode_stats.avg,
+        min_decode: decode_stats.min,
+        max_decode: decode_stats.max,
+        stddev_decode: decode_stats.stddev,
+        params: details.params,
+        quant: details.quant,
+        family: details.family,
+        size: details.size,
     })
 }

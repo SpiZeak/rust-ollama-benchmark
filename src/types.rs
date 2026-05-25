@@ -13,8 +13,10 @@ pub struct OllamaResponse {
     pub prompt_eval_count: Option<u32>,
     #[serde(default)]
     pub prompt_eval_duration: Option<u64>, // nanoseconds
-    pub eval_count: u32,
-    pub eval_duration: u64, // nanoseconds
+    #[serde(default)]
+    pub eval_count: Option<u32>,
+    #[serde(default)]
+    pub eval_duration: Option<u64>, // nanoseconds
 }
 
 #[derive(Serialize)]

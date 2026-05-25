@@ -48,11 +48,15 @@ pub async fn run_trial(
         (Some(count), Some(dur)) if dur > 0 => Some(count as f64 / (dur as f64 / 1_000_000_000.0)),
         _ => None, // KV cache hit — prefill was skipped by Ollama
     };
-    let decode_sec = res.eval_duration as f64 / 1_000_000_000.0;
+    let (eval_count, eval_duration) = match (res.eval_count, res.eval_duration) {
+        (Some(c), Some(d)) if d > 0 => (c, d),
+        _ => return Err("Ollama response missing eval_count or eval_duration".into()),
+    };
+    let decode_sec = eval_duration as f64 / 1_000_000_000.0;
 
     Ok(RunMetrics {
         prefill_tps,
-        decode_tps: res.eval_count as f64 / decode_sec,
+        decode_tps: eval_count as f64 / decode_sec,
     })
 }
 

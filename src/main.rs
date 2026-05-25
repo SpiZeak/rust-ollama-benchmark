@@ -22,7 +22,7 @@ struct Args {
     compare: Vec<String>,
 
     /// Number of benchmark iterations
-    #[arg(short, long, default_value_t = 3)]
+    #[arg(short, long, default_value_t = 5)]
     iterations: usize,
 
     /// Max tokens to generate per trial (limits decode time)
@@ -137,13 +137,25 @@ struct ModelBenchmarkResult {
     avg_prefill: f64,
     min_prefill: f64,
     max_prefill: f64,
+    stddev_prefill: f64,
     avg_decode: f64,
     min_decode: f64,
     max_decode: f64,
+    stddev_decode: f64,
     params: String,
     quant: String,
     family: String,
     size: String,
+}
+
+fn stddev(values: &[f64]) -> f64 {
+    if values.len() < 2 {
+        return 0.0;
+    }
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    let variance =
+        values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (values.len() - 1) as f64;
+    variance.sqrt()
 }
 
 /// Run a CLI command and return its stdout, or a fallback string on failure.
@@ -521,9 +533,11 @@ async fn benchmark_model(
         avg_prefill: prefill_results.iter().sum::<f64>() / prefill_results.len() as f64,
         min_prefill: prefill_results.iter().cloned().fold(f64::NAN, f64::min),
         max_prefill: prefill_results.iter().cloned().fold(f64::NAN, f64::max),
+        stddev_prefill: stddev(&prefill_results),
         avg_decode: decode_results.iter().sum::<f64>() / decode_results.len() as f64,
         min_decode: decode_results.iter().cloned().fold(f64::NAN, f64::min),
         max_decode: decode_results.iter().cloned().fold(f64::NAN, f64::max),
+        stddev_decode: stddev(&decode_results),
         params,
         quant,
         family,
@@ -606,7 +620,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Header
         println!(
             "║  {:<42}  {:>8}  {:>8}  {:>8}  {:>8}  {:>8}  {:>8} ║",
-            "Model", "Params", "AvgPre", "MinPre", "MaxPre", "AvgDec", "MaxDec"
+            "Model", "Params", "AvgPre", "StdPre", "AvgDec", "StdDec", "MinDec"
         );
         println!(
             "╠{:─<42}╬{:─<9}╬{:─<9}╬{:─<9}╬{:─<9}╬{:─<9}╬{:─<9}╣",
@@ -619,10 +633,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 r.model,
                 r.params,
                 r.avg_prefill,
-                r.min_prefill,
-                r.max_prefill,
+                r.stddev_prefill,
                 r.avg_decode,
-                r.max_decode
+                r.stddev_decode,
+                r.min_decode
             );
         }
 
@@ -644,12 +658,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("║  Model Size:     {}", r.size);
             println!("╠════════════════════════════════════════════════════════════════╣");
             println!(
-                "║  Prefill (tokens/s)   Avg: {:>10.2}  Min: {:>10.2}  Max: {:>10.2}",
-                r.avg_prefill, r.min_prefill, r.max_prefill
+                "║  Prefill (tokens/s)   Avg: {:>10.2}  Min: {:>10.2}  Max: {:>10.2}  Std: {:>10.2}",
+                r.avg_prefill, r.min_prefill, r.max_prefill, r.stddev_prefill
             );
             println!(
-                "║  Decode  (tokens/s)   Avg: {:>10.2}  Min: {:>10.2}  Max: {:>10.2}",
-                r.avg_decode, r.min_decode, r.max_decode
+                "║  Decode  (tokens/s)   Avg: {:>10.2}  Min: {:>10.2}  Max: {:>10.2}  Std: {:>10.2}",
+                r.avg_decode, r.min_decode, r.max_decode, r.stddev_decode
             );
             println!("╚════════════════════════════════════════════════════════════════╝");
         }
@@ -732,19 +746,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let min_prefill = prefill_results.iter().cloned().fold(f64::NAN, f64::min);
     let max_decode = decode_results.iter().cloned().fold(f64::NAN, f64::max);
     let min_decode = decode_results.iter().cloned().fold(f64::NAN, f64::min);
+    let std_prefill = stddev(&prefill_results);
+    let std_decode = stddev(&decode_results);
 
     println!("╔══════════════════════════════════════════════════════════════╗");
     println!("║  📊  Benchmark Results Summary                              ║");
     println!("╠══════════════════════════════════════════════════════════════╣");
     println!("║  Prompt Processing (Prefill)                                ║");
     println!(
-        "║    Average: {:>10.2}  Min: {:>10.2}  Max: {:>10.2}  tokens/sec",
-        avg_prefill, min_prefill, max_prefill
+        "║    Avg: {:>10.2}  Min: {:>10.2}  Max: {:>10.2}  Std: {:>10.2}  t/s",
+        avg_prefill, min_prefill, max_prefill, std_prefill
     );
     println!("║  Token Generation (Decode)                                  ║");
     println!(
-        "║    Average: {:>10.2}  Min: {:>10.2}  Max: {:>10.2}  tokens/sec",
-        avg_decode, min_decode, max_decode
+        "║    Avg: {:>10.2}  Min: {:>10.2}  Max: {:>10.2}  Std: {:>10.2}  t/s",
+        avg_decode, min_decode, max_decode, std_decode
     );
     println!("╚══════════════════════════════════════════════════════════════╝");
 

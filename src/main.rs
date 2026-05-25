@@ -4,7 +4,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 
-const DEFAULT_MODEL: &str = "qwen3.6:27b-q4_K_M";
+const DEFAULT_MODEL: &str = "qwen3.5:9b-q4_K_M";
 const DEFAULT_HOST: &str = "http://localhost:11434";
 
 // Simulate a heavy repository file analysis prompt

@@ -19,10 +19,7 @@ use types::{BenchConfig, BenchmarkOutput, DEFAULT_PROMPT, WARMUP_PROMPT};
 use utils::Stats;
 
 /// Run in single-model benchmark mode.
-async fn run_single(
-    client: &Client,
-    args: &Args,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_single(client: &Client, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let prompt = args.prompt.as_deref().unwrap_or(DEFAULT_PROMPT);
 
     // Gather and display system info
@@ -100,10 +97,7 @@ async fn run_single(
 }
 
 /// Run in comparison (multi-model) benchmark mode.
-async fn run_comparison(
-    client: &Client,
-    args: &Args,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_comparison(client: &Client, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let prompt = args.prompt.as_deref().unwrap_or(DEFAULT_PROMPT);
 
     print_comparison_header(&args.compare);

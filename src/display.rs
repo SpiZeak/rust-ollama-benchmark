@@ -62,7 +62,10 @@ pub fn print_model_card(
 // ─── Comparison mode ────────────────────────────────────────────────────────
 
 pub fn print_comparison_header(models: &[String]) {
-    println!("🔍  Comparison mode: benchmarking {} models\n", models.len());
+    println!(
+        "🔍  Comparison mode: benchmarking {} models\n",
+        models.len()
+    );
 }
 
 pub fn print_comparison_table(results: &[ModelBenchmarkResult]) {
@@ -124,11 +127,7 @@ pub fn print_comparison_table(results: &[ModelBenchmarkResult]) {
 // ─── Single mode results ────────────────────────────────────────────────────
 
 /// `prefill_empty` is `true` when all runs were KV-cache hits (no prefill data).
-pub fn print_single_results(
-    prefill_stats: &Stats,
-    decode_stats: &Stats,
-    prefill_empty: bool,
-) {
+pub fn print_single_results(prefill_stats: &Stats, decode_stats: &Stats, prefill_empty: bool) {
     println!("╔══════════════════════════════════════════════════════════════╗");
     println!("║  📊  Benchmark Results Summary                              ║");
     println!("╠══════════════════════════════════════════════════════════════╣");

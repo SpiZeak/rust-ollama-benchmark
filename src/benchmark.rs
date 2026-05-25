@@ -4,7 +4,7 @@ use reqwest::Client;
 use crate::types::{
     BenchConfig, ModelBenchmarkResult, OllamaOptions, OllamaRequest, OllamaResponse, RunMetrics,
 };
-use crate::utils::{fetch_tags, ModelDetailsPlain, Stats};
+use crate::utils::{ModelDetailsPlain, Stats, fetch_tags};
 
 /// Run a single benchmark trial against the Ollama API.
 pub async fn run_trial(

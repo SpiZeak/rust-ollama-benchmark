@@ -2,7 +2,7 @@ use reqwest::Client;
 use std::process::Command;
 
 use crate::types::{OllamaShow, OllamaVersion, SystemInfo};
-use crate::utils::{fetch_tags, ModelDetailsPlain};
+use crate::utils::{ModelDetailsPlain, fetch_tags};
 
 /// Run a CLI command and return its stdout, or a fallback string on failure.
 fn run_cmd(cmd: &str, args: &[&str], fallback: &str) -> String {
@@ -110,7 +110,11 @@ pub async fn gather_system_info(
 
     // RAM
     let ram_total = if cfg!(target_os = "linux") {
-        let meminfo = run_cmd("awk", &["/MemTotal/{print $2, $3}", "/proc/meminfo"], "Unknown");
+        let meminfo = run_cmd(
+            "awk",
+            &["/MemTotal/{print $2, $3}", "/proc/meminfo"],
+            "Unknown",
+        );
         if meminfo != "Unknown" {
             let kb: f64 = meminfo
                 .split_whitespace()
@@ -139,11 +143,7 @@ pub async fn gather_system_info(
     let (gpu, has_gpu) = detect_gpu();
 
     // Ollama version
-    let ollama_version = match client
-        .get(format!("{}/api/version", host))
-        .send()
-        .await
-    {
+    let ollama_version = match client.get(format!("{}/api/version", host)).send().await {
         Ok(resp) => match resp.json::<OllamaVersion>().await {
             Ok(v) => v.version,
             Err(_) => "unknown".to_string(),

@@ -88,8 +88,7 @@ impl Stats {
         let stddev = if values.len() < 2 {
             0.0
         } else {
-            let variance =
-                values.iter().map(|v| (v - avg).powi(2)).sum::<f64>() / (len - 1.0);
+            let variance = values.iter().map(|v| (v - avg).powi(2)).sum::<f64>() / (len - 1.0);
             variance.sqrt()
         };
         Self {

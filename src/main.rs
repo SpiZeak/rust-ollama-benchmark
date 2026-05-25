@@ -48,8 +48,11 @@ struct Args {
 
 #[derive(Deserialize, Debug)]
 struct OllamaResponse {
-    prompt_eval_count: u32,
-    prompt_eval_duration: u64, // nanoseconds
+    // Absent when Ollama serves the prompt from the KV cache
+    #[serde(default)]
+    prompt_eval_count: Option<u32>,
+    #[serde(default)]
+    prompt_eval_duration: Option<u64>, // nanoseconds
     eval_count: u32,
     eval_duration: u64, // nanoseconds
 }
@@ -95,9 +98,6 @@ struct ModelInfo {
 
 #[derive(Deserialize, Debug)]
 struct ProjectorInfo {
-    name: String,
-    size: u64,
-    digest: String,
     cache_type: Option<String>,
 }
 
@@ -128,7 +128,8 @@ struct SystemInfo {
 }
 
 struct RunMetrics {
-    prefill_tps: f64,
+    /// `None` when Ollama returned a KV-cache hit (no prefill was performed)
+    prefill_tps: Option<f64>,
     decode_tps: f64,
 }
 
@@ -419,11 +420,14 @@ async fn run_trial(
         .json()
         .await?;
 
-    let prefill_sec = res.prompt_eval_duration as f64 / 1_000_000_000.0;
+    let prefill_tps = match (res.prompt_eval_count, res.prompt_eval_duration) {
+        (Some(count), Some(dur)) if dur > 0 => Some(count as f64 / (dur as f64 / 1_000_000_000.0)),
+        _ => None, // KV cache hit — prefill was skipped by Ollama
+    };
     let decode_sec = res.eval_duration as f64 / 1_000_000_000.0;
 
     Ok(RunMetrics {
-        prefill_tps: res.prompt_eval_count as f64 / prefill_sec,
+        prefill_tps,
         decode_tps: res.eval_count as f64 / decode_sec,
     })
 }
@@ -514,7 +518,9 @@ async fn benchmark_model(
     for _ in 0..iterations {
         match run_trial(client, model, prompt, ctx, num_predict, temperature, host).await {
             Ok(metrics) => {
-                prefill_results.push(metrics.prefill_tps);
+                if let Some(p) = metrics.prefill_tps {
+                    prefill_results.push(p);
+                }
                 decode_results.push(metrics.decode_tps);
             }
             Err(e) => eprintln!("\n  ⚠️  Trial failed for {}: {}", model, e),
@@ -523,7 +529,7 @@ async fn benchmark_model(
     }
     pb.finish_and_clear();
 
-    if prefill_results.is_empty() {
+    if decode_results.is_empty() {
         println!("  ❌ All trials failed for {}. Skipping.", model);
         return None;
     }
@@ -724,7 +730,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         {
             Ok(metrics) => {
-                prefill_results.push(metrics.prefill_tps);
+                if let Some(p) = metrics.prefill_tps {
+                    prefill_results.push(p);
+                }
                 decode_results.push(metrics.decode_tps);
             }
             Err(e) => eprintln!("\n❌ Trial failed: {}", e),
@@ -734,29 +742,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     pb.finish_and_clear();
 
     // Statistical Analysis
-    if prefill_results.is_empty() {
+    if decode_results.is_empty() {
         println!("All trials failed. Verify Ollama is running.");
         return Ok(());
     }
 
-    let avg_prefill: f64 = prefill_results.iter().sum::<f64>() / prefill_results.len() as f64;
     let avg_decode: f64 = decode_results.iter().sum::<f64>() / decode_results.len() as f64;
-
-    let max_prefill = prefill_results.iter().cloned().fold(f64::NAN, f64::max);
-    let min_prefill = prefill_results.iter().cloned().fold(f64::NAN, f64::min);
     let max_decode = decode_results.iter().cloned().fold(f64::NAN, f64::max);
     let min_decode = decode_results.iter().cloned().fold(f64::NAN, f64::min);
-    let std_prefill = stddev(&prefill_results);
     let std_decode = stddev(&decode_results);
 
     println!("╔══════════════════════════════════════════════════════════════╗");
     println!("║  📊  Benchmark Results Summary                              ║");
     println!("╠══════════════════════════════════════════════════════════════╣");
     println!("║  Prompt Processing (Prefill)                                ║");
-    println!(
-        "║    Avg: {:>10.2}  Min: {:>10.2}  Max: {:>10.2}  Std: {:>10.2}  t/s",
-        avg_prefill, min_prefill, max_prefill, std_prefill
-    );
+    if prefill_results.is_empty() {
+        println!("║    (all runs were KV-cache hits — prefill not measured)      ║");
+    } else {
+        let avg_prefill = prefill_results.iter().sum::<f64>() / prefill_results.len() as f64;
+        let max_prefill = prefill_results.iter().cloned().fold(f64::NAN, f64::max);
+        let min_prefill = prefill_results.iter().cloned().fold(f64::NAN, f64::min);
+        let std_prefill = stddev(&prefill_results);
+        println!(
+            "║    Avg: {:>10.2}  Min: {:>10.2}  Max: {:>10.2}  Std: {:>10.2}  t/s",
+            avg_prefill, min_prefill, max_prefill, std_prefill
+        );
+    }
     println!("║  Token Generation (Decode)                                  ║");
     println!(
         "║    Avg: {:>10.2}  Min: {:>10.2}  Max: {:>10.2}  Std: {:>10.2}  t/s",

@@ -617,7 +617,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "\n╔══════════════════════════════════════════════════════════════════════════════════════╗"
         );
         println!(
-            "║  📊  Model Comparison Results                                                             ║"
+            "║  📊  Model Comparison Results                                                        ║"
         );
         println!(
             "╠══════════════════════════════════════════════════════════════════════════════════════╣"
@@ -681,7 +681,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("╔══════════════════════════════════════════════════════════════╗");
     println!("║  Ollama & Model                                              ║");
     println!("╠══════════════════════════════════════════════════════════════╣");
-    println!("║  Ollama Version:  {}", sys.ollama_version);
+    println!("║  Ollama Version: {}", sys.ollama_version);
     println!("║  Model:          {}", args.model);
     println!("║  Parameters:     {}", sys.model_params);
     println!("║  Quantization:   {}", sys.model_quant);
@@ -753,9 +753,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let std_decode = stddev(&decode_results);
 
     println!("╔══════════════════════════════════════════════════════════════╗");
-    println!("║  📊  Benchmark Results Summary                              ║");
+    println!("║  📊  Benchmark Results Summary                               ║");
     println!("╠══════════════════════════════════════════════════════════════╣");
-    println!("║  Prompt Processing (Prefill)                                ║");
+    println!("║  Prompt Processing (Prefill)                                 ║");
     if prefill_results.is_empty() {
         println!("║    (all runs were KV-cache hits — prefill not measured)      ║");
     } else {
@@ -768,7 +768,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             avg_prefill, min_prefill, max_prefill, std_prefill
         );
     }
-    println!("║  Token Generation (Decode)                                  ║");
+    println!("║  Token Generation (Decode)                                   ║");
     println!(
         "║    Avg: {:>10.2}  Min: {:>10.2}  Max: {:>10.2}  Std: {:>10.2}  t/s",
         avg_decode, min_decode, max_decode, std_decode
